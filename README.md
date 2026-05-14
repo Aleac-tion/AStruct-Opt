@@ -9,9 +9,10 @@ is really easy just like this in Cplusplus
 just that
 
 So what is AStruct?
-it has a easy CRUD to saved
-it has a stronge speed to saved
-it all face to string
+With a rich set of CRUD operations to manage your save files
+Has extremely fast speed in handling CRUD operations
+IT is text-oriented and extremely friendly to humans.
+
 very stronge and easy to use and also have rich set of features like cache,AES256,SuperArrary,extremely comprehensive CRUD API, it's everyone in one.
 but the most important aspect is non-serialized operations so when un_map<>cache worked with CRUD that performance is amazing!
 you can also use dll to use AStruct in any languages like python java GO C#
