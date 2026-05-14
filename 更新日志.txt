@@ -1,0 +1,461 @@
+﻿V10 2025-12-27 V0.01
+{
+- 已重构代码结构，提升可维护性
+- 完美适配VS2026等新版本IDE
+- 已重构AStruct本体,保留了所有的API接口,AleaCook系统还没有适配新结构!
+- AList增强了对泛型的支持,修改autoparse(<vector>)为autoParse("SuperArrayStr");
+- 所有性能大幅提升,尤其是字符串处理和文件操作相关的API,鲁棒性提升
+警告:
+	- 由于AStruct本体重构,仅适用于MSVC VS 145工具集及以上版本
+	- AleaCook系统还没有适配新结构,请暂时继续使用V9版本需要加密的项目请等待AleaCook系统适配或者使用V9版本
+}
+
+V11 2025-12-29 V0.01
+{
+- 修改了loaddata();函数的行为:
+	- 使用mmap unmap方式映射保持1:1内存比例,当文件过大会采用流式加载避免峰值内存溢出
+	- 内存比例请参考如下公式:	
+	（<= MMAP_THRESHOLD = 256 KB，当前实现走映射分支）：峰值内存约为映射视图 + 目标字符串 ≤ 2 × file_size（再加上少量 std::string/堆元数据），所以膨胀比约 ≤ 2.0。
+	例：61.3 KB → 峰值约 61.3KB (mapped) + 61.3KB (string) ≈ 122.6 KB，膨胀比 ≈ 2.0（实际物理占用可能更小，映射页按需载入）。
+	大文件（> MMAP_THRESHOLD，当前实现走流式按块处理）：峰值内存 ≈ file_size + CHUNK + 少量开销，膨胀比约 ≈ 1 + CHUNK / file_size。CHUNK 当前值为 1 MB。
+	公式：膨胀比 ≈ 1 + min(CHUNK, file_size) / file_size
+	举例：
+	file_size = 1 MB → ratio ≈ 1 + 1/1 = 2.0
+	file_size = 10 MB → ratio ≈ 1 + 1/10 = 1.10（≈110%）
+	file_size = 100 MB → ratio ≈ 1 + 1/100 = 1.01（≈101%）
+	file_size = 1 GB → ratio ≈ 1 + 1/1024 ≈ 1.00098（≈100.1%）
+	映射路径的“虚拟地址占用”不等同于即时物理内存占用：物理页面按访问载入，拷贝期间会短暂同时占用映射页与目标字符串的物理页面。实际工作集可能略高于上述估算。
+	当前策略在小文件上保持低延迟但内存膨胀仍接近 2x；对中/大文件收益显著（随文件变大，膨胀比趋近 1）。
+- 修改了trigger_async_save_two函数为后台写入的主线路,当任务累计到一定程度会触发备用线路。
+- 优化了trigger_async_save的行为,将不再允许手动触发,被触发时将会开辟新的线路进行写入任务为备用线路,性能提升,采用了C++20新特性增强了异步写入的稳定性和效率。
+- 增加了public变量tasks_Max当主异步线值大于等于此值时将会把主线路的后台任务提交给备用线路异步写入,默认值为1035可直接根据项目大小调整此值,以提升异步写入的效率和稳定性。
+- 优化了异步写入的内存使用,大幅降低了异步写入时的内存峰值占用,因双线路保证,避免了死锁问题,当主线任务小于tasks_Max则恢复主线异步线路。
+- 使用了完全原子写入覆写,每次写入都是整个内存,不存在需要管理线程写入混乱。
+}
+
+V11 2025-12-29 V0.12
+{
+- 舍弃了很多内存分配,避免string_view导致的生命周期异常,采用find和back()以及constexpr等新特性提升了字符串处理的效率和安全性。
+- 由于需要实例化,因此每个AStruct实例管理自己的周期的本质,加上loaddata已优化到可加载GB级文件膨胀率可见V11.0.1日志的公式故可用于大数据类存储
+- 考虑到了使用者的习惯与常见API巨大差距如完成一次CRUD包过一次初始化:	
+  ###
+  ```
+	AStruct as;
+	as.loaddata("xxx.astruct");
+	as.addkey("title","header","key","value");//完成一次Create
+	as.changeValue("title","header","key","values");//完成一次Update
+	((auto str =)/std::cout/...) as.getValue("title","header","key");//完成一次Read
+	as.delkey("title","header","key");//完成一次Delete
+	//注意,所有的异步写入存储操作已经被融入到所有的 Create Update Delete 操作中,不需要手动触发异步写入。
+  ###
+  ```
+- 而Json则需要:
+  ###
+  ```
+	nlohmann::json j;
+	std::ifstream in_file("config.json");
+	if (in_file.is_open()) {
+    in_file >> j; // 
+	}
+
+	j["Player"]["Inventory"]["sword"] = "Excalibur"; // Create
+	j["Player"]["Stats"]["health"] = 950;            // Update
+	auto health = j["Player"]["Stats"]["health"].get<int>(); // Read 
+	j["Player"]["Inventory"].erase("broken_shield"); // Delete
+
+	std::ofstream out_file("config.json");
+    out_file << j.dump(2);
+  ###
+  ```
+- 由此可见AStruct在易用性上大幅提升,并且性能更优异,更适合大数据存储场景但正因为API差距过大因此加入了新函数,采用了常见的命名函数帮助开发者跨平台:
+	as.toJson(); //将AStruct数据导出为Json字符串
+	as.fromJson(const std::string& jsonStr); //从Json字符串导入数据到AStruct
+- 新增的API都会返回对应的string,则开发者可用AStruct编辑Json,也可用Json编辑AStruct数据,从而实现跨平台数据存储和交换。弥补了AStruct的生态缺失问题。
+ 
+ 需注意,此功能是为了在Json适合的领域设计,请不要因AStruct的极限性能而滥用Json转化试图在 金融交易,中/大形游戏开发,轮询系统,AI大数据存储等类似场景！
+ AStruct当前目的是在高性能,小/中/大规模的数据存储场景下使用,而Json格式转化仅仅是弥补生态和Json交换需求如Response系列等场景的缺失
+ 比如你想构建一个请求可以采用AStruct存储格式,然后将数据转化为Json字符串进行网络Pos 同时网站API返回的JSON可以用fromJson来编辑主要弥补生态+多语言适配+跨环境平台+程序员学习压力  
+}
+
+V11 2026-1-16 V7.2
+{
+- 版号 V11.0.12
+- 提供了Veresion成员函数获取当前AStruct版本信息和Github仓库最新版本对比功能等
+- 主要提供了新加密架构，雪崩加密混淆架构
+- AleaCook系统已适配V11版本AStruct且进行了重构,详细如下
+	```
+	AleaCook构造时需传入参数 AleaCook(AStruct * src,std::string &inputs);
+	其中src为AStruct实例指针,inputs为加密密钥字符串格式,如下:
+	AleaCook Cook(AS,"'你想要的32位长度的key'|签名");
+	#构造内部具备了自动验证签名功能,会在本地生成_AleaCook.txt报告
+	- 流程大概为:
+	```
+		1.验证Key长度是否为32位,不正确则拒绝加密
+		2.验证签名和文件签名是否一直,错误则拒绝加密
+		3.通过签名打乱生成IV,而IV会作为SEED用于混淆key生成最终加密密钥
+	```
+	#析构函数进行了改进,会自动触发异步写入,修改了密文判断机制几乎准确率高达99.99%其他性质与V9版本一致
+- AleaCook系统已完美适配V11版本AStruct,并且性能更优异,鲁棒性更强,彻底废除了注释加密极致
+- 自此更新时间较长,因AleaCook的历史逻辑过于黑盒化且整体重构,因此花费了较长时间进行适配和测试,目前一切稳定！
+- 由于差距较大，废除了Json转化功能，可关注社区后续插件开发。
+- 请继续观察下一代AStruct V12版本,会带来更美妙的体验！
+}
+
+V11 2026-1-16 V8.1
+{
+- 版号 V11.08.1
+- 新增了clear();函数,用于清空AStruct实例中的所有数据,保留结构体本身以便重复利用
+- clear()函数已经自动内置到了loaddata中,每次加载数据前会先清空当前实例数据以避免数据混乱尤其是哈希缓存
+- 开放了变量size_t MMAP_THRESHOLD,用于设置loaddata时的内存映射阈值,默认值为256*1024(256KB)当值低于阈值时将采用内存映射,超过阈值采用特殊方式拆散结构分块加载。
+- MMAP_THRESHOLD的阈值之前膨胀率最高2.0x性能极高瞬间读取,而超过阈值则为无限接近1.0x性能略微降低但并不慢目标是存储大数据等GB级TB级别的内容。
+- 亲测MMAP_THRESHOLD在10kb的测试下指标
+	```
+	MMAP模式加载文件耗时: 116 微秒
+	非MMAP模式加载文件耗时: 184 微秒
+	```
+}
+
+V11 2026-1-16 V9.10
+{
+- 版本号 V11.09.10
+- AleaCook适配完成，架构正式命名雪崩密淆架构，采用多重混淆生成最终密钥并且采用seed生成iv和key输出二进制，逆向几乎不太可能同时RAII完成了初始化和销毁，对象池安全稳定
+- 加入新API:
+	AList list = as.GetKeysFromHeader("title", "header"); // 获取指定标题和表头下的所有键名，返回一个AList对象
+	AList list = as.GetHeadersFromTitle("title"); // 获取指定标题下的所有表头名，返回一个AList对象
+	以下为用法示范:
+	```
+	AList header_list = as.GetHeadersFromTitle("title");
+
+	for (int i = 0; i < header_list.size(); i++) {
+    AList key_list = as.GetKeysFromHeader("title", header_list[i]);
+    for (int c = 0; c < key_list.size(); c++) {
+		cout << as.getvalue("title", header_list[i], key_list[c]) << "\n";
+    }
+}
+	```
+	此展示了两种高级查询的组合，遍历所有内容。
+}
+
+
+
+当前性能测试
+- CRUD系列性能测试
+```
+测试方案为:
+const int TRIAL_COUNT = 10000; // 或100000，越大越稳定
+		auto start = std::chrono::high_resolution_clock::now();
+		for (int i = 0; i < TRIAL_COUNT; ++i) {
+		// 核心：仅包含你要测量的操作
+
+		}
+		auto end = std::chrono::high_resolution_clock::now();
+
+		auto total_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+		double avg_time_per_call = static_cast<double>(total_time.count()) / TRIAL_COUNT;
+
+		std::cout << "总计 " << TRIAL_COUNT << " 次调用，耗时 " << total_time.count() << " 纳秒\n";
+		std::cout << "平均每次调用耗时: " << avg_time_per_call << " 纳秒" << std::endl;
+	```
+	{
+	测试缓存存在时，因为缓存无法取消只能获取此数据。
+    as.getvalue("title", "header", "key");
+	总计 10000 次调用，耗时 655100 纳秒
+	平均每次调用耗时: 65.51 纳秒
+	}
+
+	{
+	由于无法容忍1万次addkey破坏测试环境，故配合DelKey进行测试，因此得出数据是addkey后Delkey的总消耗性能数据
+	as.addkey("title", "header", "keya", "value");
+	as.DelKey("title", "header", "keya");
+	总计 10000 次调用，耗时 63035400 纳秒
+	平均每次调用耗时: 6303.54 纳秒
+	}
+	
+	{
+	测试Update性能。
+	as.changeValue("title", "header", "key", "new");
+	总计 10000 次调用，耗时 14251600 纳秒
+	平均每次调用耗时: 1425.16 纳秒
+	}
+
+	{
+	综合测试CUD循环性能,每次调用包含一次Create,一次Read,一次Update,一次Delete。
+	需注意因AStruct为异步写入是无视IO的其他任何存储方法测试都需序列化->写入阻塞IO等待->反序列化但由于AStruct架构不同，无视消耗
+	for (int i = 0; i < TRIAL_COUNT; ++i) {			
+			// 核心：仅包含你要测量的操作
+			as.addkey("title", "header", "keya", "value");
+			as.changeValue("title", "header", "keya", "new");
+			as.DelKey("title", "header", "keya");		
+		}
+
+	总计 10000 次调用，耗时 71639000 纳秒
+	平均每次调用耗时: 7163.9 纳秒
+	}
+
+	- WLAN1.0 2026-3-15 V8.1-ASWLAN计划
+	{
+	# 全名为 AStructLan打击Windows平台的配置领域 让市面上知道 人类极致友好X机器极致性能X功能丰富强大 虽然理论上不存在但已经出现且试图横扫 数据交换 桌面配置 游戏开发 大数据 AI数据等的计划。
+
+	# 此非AStruct更新日志,而是一个新的动态链接库,名为AStructLan.dll
+		架构:
+		Python/C#/JAVA/... 可通过AStructLan.dll进行跨语言生态
+		由语言层调用Dll接口和开放的函数,均以字符串类型传递给DLL的const char*并处理,以标准的UTF8编码为主。
+		如Python调用时的路径是 通过dll接口并依据自己的需求取指定的CRUD的函数接口 而后传入字符串到dll中进行处理，内部则是直接#include <AStruct.h>直接return处理的结果性能折损不超10%仍在性能Proto级别
+		由于DLL本体并没有任何的逻辑,均由lib本身处理,意味着你在C++用的性能和其他任何语言的差距不超5%
+		DLL内部以std::map<const char*,AStruct*> ASmap 管理,避免了某些语言对Class管理不强的项目出现AStruct管理混乱。
+		由于AList属于makego对象而无法量化接口，因此AList本体采用了成员函数而非operator<<等，来尽量实现AList的功能。但请注意C++仍然是最好的选则
+		DLL本体信道消耗极低，现代CPU约~20ns开销，而AStruct本身性能就是优于proto因此性并不会出现夭折。
+		DLL本质是一个桥梁，通过开放简单的接口让所有计算机语言都能使用AStruct.lib本体的所有，注意是所有！而不是为每个语言单独开发一个库，极大地降低了维护成本和学习成本并且不会出现语法兼容问题。
+		注意是所有功能！ 包括缓存性能/超级数组/异步写入/MMAP/流式加载/AleaCook！
+
+	# 关于"是否支持XX语言"的反馈，请自己看实现原理，只要该语言能调用DLL并且可以处理字符串就绝对能使用，如果做不到请考虑自身的技术水平！
+	  因为AStruct本身设计就是 人类极致友好X机器极致性能X功能丰富强大 的设计，其人类友好之一就是因为纯字符串设计，如果你反馈自己的语言无法支持，那么请自问一下有什么语言会不支持字符串解析那么那种语言我就不支持
+	# 再次声明，本质是通过通用底层接口桥接AStruct.lib，不存在计算机跨语言语言适配问题！
+	# 后期会开放所有的函数接口，且函数接口名与AStruct.lib完全一致，无论是命名方式还是传参，开发者只需连接DLL并且调用函数即可，完全不需要担心兼容性问题。
+
+	# 关于此库的命名为什么是AStructLan，实际上是个多语义，既是AStructLanguage也可以是LAN桥接的意思。因为DLL就是起到了桥接作用而language意味着跨语言。
+	
+	# 此为核心代码理念展示:
+		```
+		thread_local std::string g_lastResult
+		std::map<std::string, AStruct*> ASMap;
+
+		ASMap.emplace("id", new AStruct);
+		auto it = ASMap.find("id");
+		if (it == ASMap.end())return 0;
+		it->second->loaddata(AStruct::static_getDir() + "/test.astruct");
+		g_lastResult = it->second->getvalue("title", "header", "key");
+		g_lastResult.c_str();
+
+
+	# Python接口示范:
+		```
+		# 加载 DLL
+		dll_path = r"K:/CPP_VS2026/lib/AStructLan/x64/Release/AStructLan.dll"
+		hDll = ctypes.CDLL(dll_path)
+
+		#========== 定义函数类型 ==========
+		CreateAS = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
+		createAS = CreateAS(("CreateAS", hDll))
+		print(f"✅ CreateAS 函数地址: {createAS}")
+
+		Load = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_char_p)
+		loaddata = Load(("loaddata", hDll))
+		print(f"✅ loaddata 函数地址: {loaddata}")
+
+		GetA = ctypes.CFUNCTYPE(ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p)
+		getvalue = GetA(("getvalue", hDll))
+		print(f"✅ getvalue 函数地址: {getvalue}")
+		print()
+
+		if __name__ == "__main__":
+		print("\n" + "-" * 50)
+		print("测试 getvalue")
+		print("-" * 50)
+    
+		id_val = b"1"
+		title = b"title"
+		header = b"header"
+		key = b"key"
+    
+		# 测试
+		result = getvalue(id_val, title, header, key)
+		result_str = result.decode('utf-8') if result else "None"
+		print(f"getvalue('1', 'title', 'header', 'key') = {result_str}")
+
+		```
+	#根据start = time.perf_counter_ns() getvalue测试:
+		总计 10000 次调用，耗时 4284000 纳秒
+		平均每次调用耗时: 428.40 纳秒 (0.43 微秒)
+		每秒可调用次数: 2334267 次
+	#根据start = time.perf_counter_ns() changeValue测试:
+		总共 10000 次调用, 耗时 15696400 ns
+		平均每次: 1569.64 ns (1.57 μs)
+		约每秒调用次数: 637089 次
+	}
+	
+- WLAN1.2 2026/4/10 AList适配完成
+	- 代码展示:
+	# 对标代码:
+	```
+	list = AList::autoParse(main_as->getvalue("药物列表", "药物", "name"));
+     {
+        for (int i = 0; i < list.size(); i++) {
+            for (int c = 0; c < list[i].Go().size(); c++) {
+                model->setItem(i, c, new QStandardItem(((std::string)list[i].Go()[c]).c_str()));
+            }
+        }
+     }
+	```
+	HMODULE hDll = LoadLibraryA("K:/CPP_VS2026/lib/AStructLan/x64/Release/AStructLan.dll");
+        typedef int(*alists)(const char* ID);
+        ALists = (alists)GetProcAddress(hDll, "ALists");
+
+        typedef const char* (*alistget)(const char* AListID, int index);
+		AList_Get = (alistget)GetProcAddress(hDll, "AList_Get");
+
+        typedef const char* (*go)(const char* vec, int index);
+        AList_Go = (go)GetProcAddress(hDll, "AList_Go");
+
+        typedef const char* (*alistparse)(const char* ID, int index);
+        AList_Parse = (alistparse)GetProcAddress(hDll, "AList_Get");
+
+        typedef const char* (*alistfetch)(const char* ID, const char* vec);
+        AList_fetch = (alistfetch)GetProcAddress(hDll, "AList_fetch");
+
+        typedef int (*alistsize)(const char* vec);
+        AList_Size = (alistsize)GetProcAddress(hDll, "AList_Size");
+
+        std::string drug_name = main_as->getvalue("药物列表", "药物", "name"); //此步骤为持久化超级数组，本身你也可以用AStructLan的getvalue读取，但为了省事就先利用AStruct本体
+
+        static const char* arrays = drug_name.c_str();
+
+        static const char* arrayStr = arrays;
+        int outerSize = AList_Size(arrayStr);
+
+        for (int i = 0; i < outerSize; ++i) {
+            const char* innerArrayStr = AList_Go(arrayStr, i);
+            int innerSize = AList_Size(innerArrayStr);
+
+            // 给内层数组临时分配一个 ID
+            std::string innerId = "inner_" + std::to_string(i);
+            ALists(innerId.c_str());                  // 确保存在
+            AList_fetch(innerId.c_str(), innerArrayStr);
+
+            for (int c = 0; c < innerSize; ++c) {
+                const char* val = AList_Get(innerId.c_str(), c);
+                model->setItem(i, c, new QStandardItem(val));
+            }
+        }
+		```
+	- python还原:
+	```
+	array_str = array_ptr.decode("utf-8")
+    print(f"超级数组: {array_str[:200]}...")
+
+    # === 完全按 C++ 的方式来解析 AList ===
+
+    # 外层：直接对超级数组字符串调用 AList_Size / AList_Go
+    outer_size = AList_Size(array_str.encode("utf-8"))
+    print("outer_size =", outer_size)
+
+    medicines = []
+
+    for i in range(outer_size):
+        # C++: const char* innerArrayStr = AList_Go(arrayStr, i);
+        inner_ptr = AList_Go(array_str.encode("utf-8"), i)
+        if not inner_ptr:
+            continue
+
+        inner_array_str = inner_ptr.decode("utf-8")
+
+        # 内层：为每个内层数组分配一个临时 ID，并用 AList_fetch + AList_Get
+        inner_id = f"inner_{i}".encode("utf-8")
+        ALists(inner_id)  # 确保存在
+        AList_fetch(inner_id, inner_array_str.encode("utf-8"))
+
+        inner_size = AList_Size(inner_array_str.encode("utf-8"))
+        print(f"inner[{i}] size =", inner_size)
+
+        if inner_size < 6:
+            continue
+
+        # 像 C++ 那样逐个字段取出
+        name_ptr  = AList_Get(inner_id, 0)
+        total_ptr = AList_Get(inner_id, 1)
+        price_ptr = AList_Get(inner_id, 2)
+        per_box_ptr = AList_Get(inner_id, 3)
+        day_ptr   = AList_Get(inner_id, 4)
+        times_ptr = AList_Get(inner_id, 5)
+
+        # 统一做一次解码与转换
+        name      = name_ptr.decode("utf-8") if name_ptr else ""
+        total     = float(total_ptr.decode("utf-8")) if total_ptr else 0.0
+        price     = float(price_ptr.decode("utf-8")) if price_ptr else 0.0
+        per_box   = float(per_box_ptr.decode("utf-8")) if per_box_ptr else 0.0
+        day       = float(day_ptr.decode("utf-8")) if day_ptr else 0.0
+        times     = float(times_ptr.decode("utf-8")) if times_ptr else 0.0
+
+        medicines.append({
+            "name": name,
+            "total": total,
+            "price": price,
+            "perBox": per_box,
+            "day": day,
+            "times": times
+        })
+	```
+# 由于AList抽象级别过高且makego无法被量化，其属于C++特例，因此只能将AList接口功能封装成高级语言风格。
+
+V11 2026-4-12 V8.7
+{
+- 版号 V11.08.7
+- 小更新，提供了GetAllTitle() 函数，允许你获取当前structdata中所有的[title]并返回到一个AList对象中。
+- 你可基于GetAllTitle()函数配合GetHeadersFromTitle()和GetKeysFromHeader()来实现对整个AStruct数据的遍历，极大地提升了AStruct的查询能力和灵活性。
+}
+
+V12 2026-4-26 V0.15
+{
+- 版本号 V12.0.15
+- 将部分老旧算法的API残留旧版异步写入替换为重构版的异步写入。大幅提升早期API的性能，其中包含了:AppendHeader AppendTitle
+- AppendHeader优化:
+	- 将 structdata 按行拆分的老旧逻辑替换为find 定位插入点后resize 扩容
+	- 将 遍历查找 后 ostringstream 重组老旧逻辑替换为memmove 后移数据 然后 memcpy 写入新块
+	- 从“重建文档”变为“原地插入”
+- AppendTitle优化:
+	- 使用 std::ostringstream 构造新块的老旧逻辑 改为 string::append 拼接新块
+	- structdata.insert(0, block) 头部插入的老旧逻辑 改为 预分配总容量（block + src）后 swap 交换
+	- 从「头部插入 + 随机扩容」变为「交换构造 + 精确预分配」
+- 优化总结:
+	- [AppendTitle] 消除了 ostringstream 的格式化开销
+	- [AppendTitle] 精确预分配，避免多次扩容与内存拷贝
+	- [AppendTitle] 尾部追加式构造 + swap，比头部插入更友好
+	- [AppendTitle] 同时也同样使用 trigger_async_save_two 快路径写入
+	- [AppendHeader] 多次分配优化为一次扩容
+	- [AppendHeader] 新版本后无任何拷贝,而是采用新特性mem系列函数
+	- [AppendHeader] 时间复杂度为 O(n) 定位 + O(add) 移动
+	- [AppendHeader] 几乎不受文档大小影响
+- 正式开放V12版本。
+- 所有API的V11~V12的优化均来自日常使用中发现的性能瓶颈问题,如虚幻5中API高级查询不足无法彻底取代虚幻5自带的序列化,AAIScript中频繁创建AStruct作为协议发现Append系列性能不足且架构老化，在研发授权时优化了AleaCook加密架构，在研发Pythonflask时py与C++的跨语言适配。以及在研发AStructLAN中发现了编码问题而得到启发。
+- 以上问题均已得到解决，耗时可所谓是目前维护时长最长的几倍，且性能，安全性，架构，易用性等方面都有了大幅提升。尤其是工业级运用场景的压力测试。所有CRUD在真实底层开发如系统架构，虚幻5等各自API的所有单次和连续调用耗时均不超2000ns
+- 在这V11~V12期间我开发了:
+	虚幻5游戏<奥比斯:神话> AAIScript AAICenter 云QT6服务器NeaseServer AleacNease NeaseFRPTool AleaCopilot AleeCraftX Aledicater云授权版本 Py_AleacAledi由Python使用纯AStruct完成网络数据交换试验。
+	高级查询能力来自于游戏中不足而获得优化。大量构造临时AStruct进行协议通信如AAI脚本与AAIcenter的通信让我发现Append系列的老化问题。
+	在NeaseServer和AleacNease中让我发现AStruct本身的结构可直接传输,在体积上比JSON小,比proto略大,且可直接发送字符串接收无需序列化操作直接读取,加上是字符串格式以及其极高的性能和结构简单使得在网络交换中哪怕JS不支持也可以手动解析且性能不逊色。
+	在Aledicater中进一步让我发现AleaCook的可优化性,因此AleaCook优化后,现在我已直接投入服务器使用。
+	NeaseFRPTool作为兴趣项目，主要是包装了FRP工具后使用AStruct完成配置替代toml。且性能更高。可利用超级数组来组合隧道。
+	AleeCraftX作为兴趣项目，主要是包装了Minecraft服务器大部分功能，并且用AStruct完成了所有的替代。
+	AleaCopilot作为兴趣项目，主要是利用了llamacpp和AStruct运行推理AI。并且可用AStruct完成所有的存储保存。
+	其中AAICenter连接了除游戏面外的所有项目，作为一个中心化的服务，提供了AStruct数据存储，AleaCook加密，协议通信等功能。采用AAIScript C++作为语言。可自行探索。
+- V12完成后更新将变得缓慢,因为实在没有可更新的地方。会继续维护，当然哪怕不维护也能成为当前 人类极致友好X机器极致性能X功能丰富强大 最唯一的纯C++库，后续会有一些插件开发。请自行去AAICenter社区关注,Github社区更新较为缓慢,毕竟维护多个社区较为麻烦。不过AAICenter将专门处理所有相关事务！
+- AAICenter具备 下载 上传 讨论 反馈 更新其他相关软件，AAIScriptC++可让你自行创造强大的插件来让你控制AAICenter的逻辑如账号关联，小程序开发，其提供了丰富的layout和足够的事件触发。
+}
+
+V12 2026-5-1 V5.25
+{
+- 版本号 V12.05.25
+- 将缓存管理器重构，从map更新为unordered_map，维护了FIFO的同时提升了安全边界和性能，尤其是在大数据存储场景下，缓存的效率提升显著。
+- 缓存管理时将脏key缓存完全清除，并加入预定义功能。
+- 预定义功能允许开发者预先定义一些常用的key，这些key将被优先保存在缓存中，确保在频繁访问时能够获得最佳性能。
+	需注意，预定义一定要保证key是正确的否则会导致极大的BUG，如getvalue永远读取定义错误的数据。请保证value的正确性。
+	用法分别有Predefine("title","header","key","value");和Predefine({"title","header","key","value"});
+- 预定义功能特别适用于那些在项目中频繁访问的key但不会变化的配置。
+- Predefine 适合：协议常量、版本号、固定配置、不变参数。不适合：每次请求都变的数据。
+	最网络中也有着较大的用处如典型的用法是:
+	```
+	Predefine("Network", "Server", "IP", "");
+	后续用 changevalue 填充真实 IP	
+	之后 getvalue 就直接命中 Predefine 预留的缓存位置
+	先占位、后更新、稳定命中，且永远不进入淘汰流程。
+	并且预定义有模糊功能，先随便定义一个value，因为缓存管理只知道返回数据。因此value无论是多少，性能差距都并不大。
+	而changevalue刚好是更新value的，此时再次更新，数据完全正确。在无需存档的情况下用处极强。尤其是在AAIC++和网络协议中。
+	如先定义一个无意义的缓存
+	as.Predefine("title", "header", "key", "value");
+	修改缓存为正确的值
+	as.changeValue("title", "header", "key", "127.0.0.1");
+	之后就可以直接使用缓存了
+	as.getvalue("title", "header", "key");
+	加之预定义功能只会现到初始化中，因此在项目启动时就可以预定义好所有的常用key，确保在后续的使用中能够获得最佳性能和稳定性。
+	```
+
+}
