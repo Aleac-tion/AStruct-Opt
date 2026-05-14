@@ -17,6 +17,16 @@ very stronge and easy to use and also have rich set of features like cache,AES25
 but the most important aspect is non-serialized operations so when un_map<>cache worked with CRUD that performance is amazing!
 you can also use dll to use AStruct in any languages like python java GO C#
 
+look
+```
+AStruct AS
+AS.loaddata(yourpath);
+AS.getvalue("title","header","key");
+AS.Delkey("title","header","key");
+```
+It is fully automated storage when you trigger a write operation.
+He will work on a background thread, and you will not experience any blocking or lag in the foreground.
+
 i have made CloudDrive only by AStruct,yeah without any json and proto.
 i have made a C++ Script,that core all by AStruct.
 and show you AStruct can used in any Languages!
