@@ -1027,9 +1027,6 @@ void AleacNease::onConnected()
 
 void AleacNease::connectToServer() 
 {
-    //m_socket->connectToHost("aleac.top", 47483);
-    //m_socket->connectToHost("127.0.0.1", 1234);
-    //m_socket->connectToHost("240e:3a3:71a3:96f0:ffca:507c:abea:fd8d", 1234);
     m_socket->connectToHost(ui.lineEdit_6->text(), ui.lineEdit_2->text().toUInt());
 }
 
